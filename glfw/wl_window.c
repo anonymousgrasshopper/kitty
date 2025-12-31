@@ -587,7 +587,7 @@ create_surface(_GLFWwindow* window, const _GLFWwndconfig* wndconfig) {
     wl_surface_add_listener(window->wl.surface, &surfaceListener, window);
     wl_surface_set_user_data(window->wl.surface, window);
 
-    if (_glfw.wl.color_manager.has_needed_capabilities) {
+    if (_glfw.wl.color_manager.has_needed_capabilities && false) {
         ensure_color_manager_ready();
         if (_glfw.wl.color_manager.image_description && !window->wl.color_management) {
             window->wl.color_management = wp_color_manager_v1_get_surface(
