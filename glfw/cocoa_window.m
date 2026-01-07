@@ -1314,36 +1314,28 @@ is_modifier_pressed(NSUInteger flags, NSUInteger target_mask, NSUInteger other_m
 
 - (void)scrollWheel:(NSEvent *)event
 {
-    double deltaX = [event scrollingDeltaX];
-    double deltaY = [event scrollingDeltaY];
-
-    int flags = [event hasPreciseScrollingDeltas] ? 1 : 0;
-    if (flags) {
+    GLFWScrollEvent ev = {.keyboard_modifiers=translateFlags([event modifierFlags])};
+    ev.x_offset = [event scrollingDeltaX];
+    ev.y_offset = [event scrollingDeltaY];
+    if ([event hasPreciseScrollingDeltas]) {
+        ev.offset_type = GLFW_SCROLL_OFFEST_HIGHRES;
         float xscale = 1, yscale = 1;
         _glfwPlatformGetWindowContentScale(window, &xscale, &yscale);
-        if (xscale > 0) deltaX *= xscale;
-        if (yscale > 0) deltaY *= yscale;
+        if (xscale > 0) ev.x_offset *= xscale;
+        if (yscale > 0) ev.y_offset *= yscale;
     }
 
     switch([event momentumPhase]) {
-        case NSEventPhaseBegan:
-            flags |= (1 << 1); break;
-        case NSEventPhaseStationary:
-            flags |= (2 << 1); break;
-        case NSEventPhaseChanged:
-            flags |= (3 << 1); break;
-        case NSEventPhaseEnded:
-            flags |= (4 << 1); break;
-        case NSEventPhaseCancelled:
-            flags |= (5 << 1); break;
-        case NSEventPhaseMayBegin:
-            flags |= (6 << 1); break;
-        case NSEventPhaseNone:
-        default:
-            break;
+        case NSEventPhaseBegan: ev.momentum_type = GLFW_MOMENTUM_PHASE_BEGAN; break;
+        case NSEventPhaseStationary: ev.momentum_type = GLFW_MOMENTUM_PHASE_STATIONARY; break;
+        case NSEventPhaseChanged: ev.momentum_type = GLFW_MOMENTUM_PHASE_ACTIVE; break;
+        case NSEventPhaseEnded: ev.momentum_type = GLFW_MOMENTUM_PHASE_ENDED; break;
+        case NSEventPhaseCancelled: ev.momentum_type = GLFW_MOMENTUM_PHASE_CANCELED; break;
+        case NSEventPhaseMayBegin: ev.momentum_type = GLFW_MOMENTUM_PHASE_MAY_BEGIN; break;
+        case NSEventPhaseNone: break;
     }
 
-    _glfwInputScroll(window, deltaX, deltaY, flags, translateFlags([event modifierFlags]));
+    _glfwInputScroll(window, &ev);
 }
 
 - (NSDragOperation)draggingEntered:(id <NSDraggingInfo>)sender
@@ -1720,6 +1712,8 @@ void _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
     return !glfw_window->ns.layer_shell.is_active || glfw_window->ns.layer_shell.config.type != GLFW_LAYER_SHELL_BACKGROUND;
 }
 
+static void apply_titlebar_color_settings(_GLFWwindow *window);
+
 static void
 update_titlebar_button_visibility_after_fullscreen_transition(_GLFWwindow* w, bool traditional, bool made_fullscreen) {
     // Update window button visibility
@@ -1736,6 +1730,7 @@ update_titlebar_button_visibility_after_fullscreen_transition(_GLFWwindow* w, bo
         [[window standardWindowButton: NSWindowMiniaturizeButton] setHidden:button_hidden];
         [[window standardWindowButton: NSWindowZoomButton] setHidden:button_hidden];
     }
+    if (!made_fullscreen) apply_titlebar_color_settings(w);
 }
 
 - (void)toggleFullScreen:(nullable id)sender
@@ -3354,6 +3349,20 @@ set_title_bar_background(NSWindow *window, NSColor *backgroundColor) {
 #undef tag
 }
 
+static void
+apply_titlebar_color_settings(_GLFWwindow *window) {
+#define tc window->ns.last_applied_titlebar_settings.color
+    GLFWWindow *nsw = window->ns.object;
+    if (!window->ns.titlebar_hidden && window->decorated && tc.was_set && window->ns.last_applied_titlebar_settings.transparent) {
+        NSColor *titlebar_color = [NSColor colorWithSRGBRed:tc.red green:tc.green blue:tc.blue alpha:tc.alpha];
+        set_title_bar_background(nsw, titlebar_color);
+        [titlebar_color release];
+    } else clear_title_bar_background_views(nsw);
+#undef tc
+}
+
+
+
 GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool use_system_color, unsigned int system_color, int background_blur, unsigned int hide_window_decorations, bool show_text_in_titlebar, int color_space, float background_opacity, bool resizable) { @autoreleasepool {
     _GLFWwindow* window = (_GLFWwindow*)w;
     if (window->ns.layer_shell.is_active) return;
@@ -3367,8 +3376,9 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
         window_background = background_blur > 0 ? [NSColor colorWithWhite: 0 alpha: 0.001f] : [NSColor clearColor];
     }
     NSAppearance *appearance = nil;
-    bool titlebar_transparent = false;
-    NSColor *titlebar_color = nil;
+#define tc window->ns.last_applied_titlebar_settings.color
+    tc.was_set = false;
+    window->ns.last_applied_titlebar_settings.transparent = false;
     const NSWindowStyleMask current_style_mask = [nsw styleMask];
     const bool in_fullscreen = ((current_style_mask & NSWindowStyleMaskFullScreen) != 0) || window->ns.in_traditional_fullscreen;
     NSAppearance *light_appearance = is_transparent ? [NSAppearance appearanceNamed:NSAppearanceNameVibrantLight] : [NSAppearance appearanceNamed:NSAppearanceNameAqua];
@@ -3381,13 +3391,14 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
                 appearance = dark_appearance; break;
         }
     } else {
-        double red = ((color >> 16) & 0xFF) / 255.0;
-        double green = ((color >> 8) & 0xFF) / 255.0;
-        double blue = (color & 0xFF) / 255.0;
-        double luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+        tc.red = ((color >> 16) & 0xFF) / 255.0;
+        tc.green = ((color >> 8) & 0xFF) / 255.0;
+        tc.blue = (color & 0xFF) / 255.0;
+        tc.alpha = background_opacity;
+        tc.was_set = true;
+        double luma = 0.2126 * tc.red + 0.7152 * tc.green + 0.0722 * tc.blue;
         appearance = luma < 0.5 ? dark_appearance : light_appearance;
-        titlebar_color = [NSColor colorWithSRGBRed:red green:green blue:blue alpha:background_opacity];
-        titlebar_transparent = true;
+        window->ns.last_applied_titlebar_settings.transparent = true;
     }
     [nsw setBackgroundColor:window_background];
     [nsw setAppearance:appearance];
@@ -3404,7 +3415,7 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
             decorations_desc = "no-titlebar";
             window->decorated = true;
             has_shadow = true;
-            titlebar_transparent = true;
+            window->ns.last_applied_titlebar_settings.transparent = true;
             window->ns.titlebar_hidden = true;
             show_text_in_titlebar = false;
             break;
@@ -3422,7 +3433,7 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
     // https://github.com/kovidgoyal/kitty/issues/6439
     if (is_transparent) has_shadow = false;
     bool hide_titlebar_buttons = !in_fullscreen && window->ns.titlebar_hidden;
-    [nsw setTitlebarAppearsTransparent:titlebar_transparent];
+    [nsw setTitlebarAppearsTransparent:window->ns.last_applied_titlebar_settings.transparent];
     [nsw setHasShadow:has_shadow];
     [nsw setTitleVisibility:(show_text_in_titlebar) ? NSWindowTitleVisible : NSWindowTitleHidden];
     NSColorSpace *cs = nil;
@@ -3435,13 +3446,13 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
     debug(
         "Window Chrome state:\n\tbackground: %s\n\tappearance: %s color_space: %s\n\t"
         "blur: %d has_shadow: %d resizable: %d decorations: %s (%d)\n\t"
-        "titlebar_transparent: %d titlebar_color: %s title_visibility: %d hidden: %d buttons_hidden: %d"
+        "titlebar_transparent: %d titlebar_color_set: %d title_visibility: %d hidden: %d buttons_hidden: %d"
         "\n",
         window_background ? [window_background.description UTF8String] : "<nil>",
         appearance ? [appearance.name UTF8String] : "<nil>",
         cs ? (cs.localizedName ? [cs.localizedName UTF8String] : [cs.description UTF8String]) : "<nil>",
-        background_blur, has_shadow, resizable, decorations_desc, window->decorated, titlebar_transparent,
-        titlebar_color ? [titlebar_color.description UTF8String] : "<nil>",
+        background_blur, has_shadow, resizable, decorations_desc, window->decorated,
+        window->ns.last_applied_titlebar_settings.transparent, tc.was_set,
         show_text_in_titlebar, window->ns.titlebar_hidden, hide_titlebar_buttons
     );
     [nsw setColorSpace:cs];
@@ -3457,9 +3468,9 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
     } else {
         [nsw setStyleMask:window->ns.pre_full_screen_style_mask | fsmask];
     }
-    if (!window->ns.titlebar_hidden && window->decorated && titlebar_color != nil && titlebar_transparent) {
-        set_title_bar_background(nsw, titlebar_color);
-    } else clear_title_bar_background_views(nsw);
+#undef tc
+    apply_titlebar_color_settings(window);
+
     // HACK: Changing the style mask can cause the first responder to be cleared
     [nsw makeFirstResponder:window->ns.view];
 }}
